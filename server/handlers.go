@@ -10,11 +10,17 @@ import (
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
 
 	"github.com/sorenisanerd/gotty/webtty"
+)
+
+const (
+	serverSidePingInterval = 30 * time.Second
+	serverSidePongWait     = 90 * time.Second
 )
 
 func (server *Server) generateHandleWS(ctx context.Context, cancel context.CancelFunc, counter *counter) http.HandlerFunc {
@@ -71,6 +77,9 @@ func (server *Server) generateHandleWS(ctx context.Context, cancel context.Cance
 			closeReason = err.Error()
 			return
 		}
+		setupKeepAlive(conn)
+		done := make(chan struct{})
+		startPingLoop(conn, done)
 		defer conn.Close()
 
 		if server.options.PassHeaders {
@@ -263,4 +272,35 @@ func (server *Server) titleVariables(order []string, varUnits map[string]map[str
 	}
 
 	return titleVars
+}
+
+func setupKeepAlive(conn *websocket.Conn) {
+	_ = conn.SetReadDeadline(time.Now().Add(serverSidePongWait))
+
+	conn.SetPongHandler(func(string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(serverSidePongWait))
+		return nil
+	})
+}
+
+func startPingLoop(conn *websocket.Conn, done <-chan struct{}) {
+	ticker := time.NewTicker(serverSidePingInterval)
+
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := conn.WriteControl(
+					websocket.PingMessage,
+					nil,
+					time.Now().Add(5*time.Second),
+				); err != nil {
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
 }
